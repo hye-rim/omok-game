@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>오목</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; user-select:none; }
+  html, body {
+    width:100%; height:100%; overflow:hidden;
+    background:radial-gradient(circle at 50% 20%, #3b2a1a 0%, #1f160d 60%, #0f0a05 100%);
+    font-family:-apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+    color:#fff;
+    touch-action:none;
+  }
+  #stage {
+    width:100%; height:100%;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    padding:8px;
+  }
+  #hud {
+    display:flex; justify-content:space-between; align-items:center; gap:8px;
+    padding:0 2px 8px;
+  }
+  .player {
+    display:flex; align-items:center; gap:7px;
+    padding:5px 10px 5px 6px; border-radius:999px;
+    background:rgba(255,255,255,.06); border:2px solid transparent;
+    transition:border-color .2s, background .2s;
+    min-width:0;
+  }
+  .player.turn { border-color:#ffc94d; background:rgba(255,201,77,.14); }
+  .player .stone { width:20px; height:20px; border-radius:50%; flex:none; }
+  .player .stone.b { background:radial-gradient(circle at 35% 30%, #666, #111 60%, #000); }
+  .player .stone.w { background:radial-gradient(circle at 35% 30%, #fff, #e6e6e6 55%, #aaa); }
+  .player .name { font-size:13px; font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #status { flex:1; min-width:0; text-align:center; font-size:13px; font-weight:700; color:#f3dcb0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #hud .icons { display:flex; gap:6px; }
+  #hud button {
+    background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.2); color:#fff;
+    width:32px; height:32px; border-radius:8px; font-size:14px; cursor:pointer;
+  }
+  #hud button:disabled { opacity:.35; cursor:default; }
+  #wrap { position:relative; }
+  #game {
+    display:block;
+    border-radius:8px;
+    box-shadow:0 0 0 3px #7a5328, 0 0 0 6px #2e1d0c, 0 12px 40px rgba(0,0,0,.6);
+    touch-action:none;
+    cursor:pointer;
+  }
+  #overlay {
+    position:absolute; inset:0;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px;
+    text-align:center; padding:20px;
+    background:rgba(20,12,4,.8);
+    border-radius:8px;
+    backdrop-filter:blur(2px);
+  }
+  #overlay.hidden { display:none; }
+  #overlay h1 { font-size:40px; font-weight:900; letter-spacing:.06em;
+    background:linear-gradient(180deg,#fff 0%,#ffe08a 55%,#e0a030 100%);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    filter:drop-shadow(0 3px 0 #5a3000); }
+  #overlay h2 { font-size:30px; font-weight:900; }
+  #overlay p { font-size:14px; color:#f3dcb0; line-height:1.6; }
+  #overlay .help { font-size:12px; color:#c9ad7f; line-height:1.7; }
+  #overlay .group { display:flex; flex-direction:column; align-items:center; gap:6px; }
+  #overlay .label { font-size:11px; letter-spacing:.14em; color:#c9ad7f; font-weight:800; }
+  #overlay .seg { display:flex; background:rgba(255,255,255,.08); border-radius:999px; padding:3px; gap:2px; }
+  #overlay .seg button {
+    background:none; border:none; color:#f3dcb0; font-weight:800; font-size:14px;
+    padding:8px 14px; border-radius:999px; cursor:pointer;
+  }
+  #overlay .seg button.on { background:#ffc94d; color:#3a2000; }
+  #overlay .record { font-size:12px; color:#c9ad7f; min-height:1em; font-variant-numeric:tabular-nums; }
+  #overlay .row { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+  #overlay .main {
+    margin-top:6px;
+    background:linear-gradient(180deg,#ffe08a,#e0a030);
+    color:#3a2000; font-weight:900; font-size:17px;
+    border:none; border-radius:999px; padding:12px 34px;
+    box-shadow:0 4px 0 #8a5a10; cursor:pointer;
+  }
+  #overlay .main:active { transform:translateY(3px); box-shadow:0 1px 0 #8a5a10; }
+  #overlay .sub {
+    margin-top:6px;
+    background:rgba(255,255,255,.1); color:#f3dcb0; font-weight:800; font-size:15px;
+    border:1px solid rgba(255,255,255,.25); border-radius:999px; padding:11px 22px; cursor:pointer;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="col">
+    <div id="hud">
+      <div class="player" id="p1"><span class="stone b"></span><span class="name" id="n1">흑</span></div>
+      <div id="status"></div>
+      <div class="player" id="p2"><span class="stone w"></span><span class="name" id="n2">백</span></div>
+      <div class="icons">
+        <button id="undoBtn" title="무르기 (Z)">↩</button>
+        <button id="muteBtn" title="소리 (M)">🔊</button>
+        <button id="menuBtn" title="메뉴 (Esc)">☰</button>
+      </div>
+    </div>
+    <div id="wrap">
+      <canvas id="game"></canvas>
+      <div id="overlay"></div>
+    </div>
+  </div>
+</div>
+<script src="game.js"></script>
+</body>
+</html>
