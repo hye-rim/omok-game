@@ -248,14 +248,14 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
 
 function fit() {
-  const hudH = 56;
-  const scale = Math.min((innerWidth - 16) / SIZE, (innerHeight - 16 - hudH) / SIZE);
+  const hudH = 112;   // 위 상태줄 + 흑 VS 백 + 판 테두리·그림자
+  const scale = Math.min((innerWidth - 28) / SIZE, (innerHeight - 24 - hudH) / SIZE);
   const css = Math.floor(SIZE * scale);
   const dpr = window.devicePixelRatio || 1;
   canvas.style.width = canvas.style.height = css + 'px';
   canvas.width = canvas.height = Math.round(css * dpr);
   ctx.setTransform(canvas.width / SIZE, 0, 0, canvas.height / SIZE, 0, 0);
-  $('col').style.width = Math.max(css, 300) + 'px';
+  $('col').style.width = Math.min(innerWidth - 16, Math.max(css, 300)) + 'px';
   draw();
 }
 addEventListener('resize', fit);
@@ -683,18 +683,27 @@ function updateHud() {
 const px = (i) => MARGIN + (i % N) * CELL;
 const py = (i) => MARGIN + ((i / N) | 0) * CELL;
 
+// 돌: 진한 그림자가 아래로 깔리고 테두리를 두른 스티커 느낌 + 윗부분 광택
+const INK = '#2b1d52';
 function drawStone(x, y, p, alpha = 1) {
   ctx.globalAlpha = alpha;
-  ctx.fillStyle = 'rgba(0,0,0,.28)';
+  ctx.fillStyle = 'rgba(43,29,82,.55)';
   ctx.beginPath();
-  ctx.arc(x + 2, y + 3, STONE_R, 0, Math.PI * 2);
+  ctx.arc(x, y + 3.5, STONE_R, 0, Math.PI * 2);
   ctx.fill();
   const g = ctx.createRadialGradient(x - STONE_R * 0.35, y - STONE_R * 0.4, STONE_R * 0.1, x, y, STONE_R);
-  if (p === BLACK) { g.addColorStop(0, '#6a6a6a'); g.addColorStop(0.45, '#1a1a1a'); g.addColorStop(1, '#000'); }
-  else { g.addColorStop(0, '#ffffff'); g.addColorStop(0.6, '#ececec'); g.addColorStop(1, '#b8b8b8'); }
+  if (p === BLACK) { g.addColorStop(0, '#7a7a86'); g.addColorStop(0.45, '#23202e'); g.addColorStop(1, '#0c0a14'); }
+  else { g.addColorStop(0, '#ffffff'); g.addColorStop(0.6, '#f3f1f8'); g.addColorStop(1, '#c9c4d8'); }
   ctx.fillStyle = g;
   ctx.beginPath();
   ctx.arc(x, y, STONE_R, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = INK;
+  ctx.stroke();
+  ctx.fillStyle = p === BLACK ? 'rgba(255,255,255,.35)' : 'rgba(255,255,255,.95)';
+  ctx.beginPath();
+  ctx.ellipse(x - STONE_R * 0.32, y - STONE_R * 0.42, STONE_R * 0.32, STONE_R * 0.17, -0.6, 0, Math.PI * 2);
   ctx.fill();
   ctx.globalAlpha = 1;
 }
@@ -751,13 +760,15 @@ function draw() {
   if (winLine) {
     const sorted = [...winLine].sort((a, b) => a - b);
     const a = sorted[0], b = sorted[sorted.length - 1];
-    ctx.strokeStyle = 'rgba(255,60,60,.85)';
-    ctx.lineWidth = 6;
     ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(px(a), py(a));
-    ctx.lineTo(px(b), py(b));
-    ctx.stroke();
+    for (const [w, c] of [[12, INK], [7, '#ff5fa2']]) {
+      ctx.strokeStyle = c;
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.moveTo(px(a), py(a));
+      ctx.lineTo(px(b), py(b));
+      ctx.stroke();
+    }
     ctx.lineCap = 'butt';
   }
 
@@ -802,7 +813,7 @@ function showHome() {
   const wins = Number(store.get(WINS_KEY)) || 0;
   const on = loadJson(ONLINE_KEY);
   showOverlay(`
-    <h1>오목</h1>
+    <h1>오<span class="y">목</span></h1>
     <p>가로·세로·대각선으로 <b>5개</b>를 먼저 이으면 승리!</p>
     <div class="modes">
       <button class="mode" data-act="aiMenu"><span class="ico">🤖</span><b>컴퓨터랑 하기</b><small>쉬움 · 보통 · 어려움</small></button>
