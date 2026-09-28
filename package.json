@@ -1,0 +1,13 @@
+{
+  "name": "omok-game",
+  "version": "1.0.0",
+  "description": "컴퓨터와 두거나 방 코드로 친구와 실시간 대결하는 오목",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}

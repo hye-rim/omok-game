@@ -245,6 +245,7 @@ const STARS = [[3, 3], [3, 11], [7, 7], [11, 3], [11, 11]];
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
 
 function fit() {
   const hudH = 56;
@@ -264,10 +265,21 @@ const store = {
   get(k) { try { return localStorage.getItem(k); } catch (_) { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
 };
-const RECORD_KEY = 'omokRecord';   // { easy: {w, l}, normal: …, hard: … }
+const RECORD_KEY = 'omokRecord';   // 컴퓨터 상대 { easy: {w, l}, normal: …, hard: … }
 const WINS_KEY = 'omokWins';       // 컴퓨터 상대 총 승수 (로비 카드에 표시)
-function loadRecord() {
-  try { return JSON.parse(store.get(RECORD_KEY)) || {}; } catch (_) { return {}; }
+const ONLINE_KEY = 'omokOnline';   // 온라인 { w, l }
+function loadJson(k) {
+  try { return JSON.parse(store.get(k)) || {}; } catch (_) { return {}; }
+}
+function myName() { return store.get('omokName') || ''; }
+
+// 새로고침해도 같은 대국으로 돌아오도록 탭 단위로 기억한다
+const SESSION_KEY = 'omokSession';
+function loadSession() {
+  try { return JSON.parse(sessionStorage.getItem(SESSION_KEY)); } catch (_) { return null; }
+}
+function saveSession(s) {
+  try { s ? sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)) : sessionStorage.removeItem(SESSION_KEY); } catch (_) {}
 }
 
 // ---------- Sound ----------
@@ -292,45 +304,68 @@ function tone(freq, dur, type = 'sine', vol = 0.12, slide = 0) {
 const sfx = {
   place: (p) => tone(p === BLACK ? 220 : 260, 0.07, 'triangle', 0.2, -80),
   undo: () => tone(500, 0.08, 'sine', 0.08, -200),
+  tick: () => tone(880, 0.04, 'square', 0.04),
+  found: () => [660, 880].forEach((f, i) => setTimeout(() => tone(f, 0.12, 'sine', 0.08), i * 110)),
   win: () => [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => tone(f, 0.2, 'square', 0.06), i * 120)),
   lose: () => [392, 330, 262, 196].forEach((f, i) => setTimeout(() => tone(f, 0.25, 'triangle', 0.1), i * 180)),
 };
 
 // ---------- Game state ----------
+// 두 모드가 판·수순·차례를 같은 변수로 공유한다. 온라인은 서버가 보내준 값으로 덮어쓴다.
+let mode = null;           // null(메뉴) | ai | online
 let board = new Int8Array(N * N);
 let moves = [];            // 둔 순서대로 칸 번호
 let turn = BLACK;
 let winLine = null;
 let over = false;
-let mode = store.get('omokMode') || 'ai';            // ai | pvp
+let hover = -1;            // 마우스가 올라간 칸
+let pending = -1;          // 터치: 한 번 누르면 예약, 같은 칸을 한 번 더 누르면 착수
+let cursor = -1;           // 키보드 커서
+
+// 컴퓨터 대전
 let level = store.get('omokLevel') || 'normal';      // easy | normal | hard
 let humanColor = Number(store.get('omokColor')) || BLACK;
 let thinking = false;
 let aiTimer = null;
-let hover = -1;            // 마우스가 올라간 칸
-let pending = -1;          // 터치: 한 번 누르면 예약, 같은 칸을 한 번 더 누르면 착수
-let cursor = -1;           // 키보드 커서
-let started = false;
 
-const isAiTurn = () => mode === 'ai' && turn !== humanColor;
+// 온라인
+let room = null;           // 서버가 보내준 방 스냅샷
+let screen = '';           // 온라인 오버레이 화면: online | queued | waiting | result
+let turnEnd = 0;           // 이번 수 제한 시각 (performance.now 기준)
+let netDown = false;       // 대국 중 연결이 끊겨 다시 붙는 중
+let resultSeen = '';       // 판 보기로 닫은 결과창을 다시 띄우지 않기 위한 표시
+let recorded = '';         // 같은 판을 두 번 기록하지 않기 위한 표시
 
-function newGame() {
-  clearTimeout(aiTimer);
+const myColor = () => (mode === 'ai' ? humanColor : room ? room.you : EMPTY);
+function canPlay() {
+  if (over || !mode) return false;
+  if (mode === 'ai') return !thinking && turn === humanColor;
+  return !!room && room.state === 'playing' && turn === room.you && !netDown;
+}
+
+function resetBoard() {
   board = new Int8Array(N * N);
   moves = [];
   turn = BLACK;
   winLine = null;
   over = false;
-  thinking = false;
   hover = pending = cursor = -1;
-  started = true;
+}
+
+// ---------- 컴퓨터 대전 ----------
+function newAiGame() {
+  leaveOnline();
+  clearTimeout(aiTimer);
+  mode = 'ai';
+  thinking = false;
+  resetBoard();
   hideOverlay();
   updateHud();
   draw();
   maybeAi();
 }
 
-function place(i) {
+function placeAi(i) {
   if (over || board[i] !== EMPTY) return false;
   board[i] = turn;
   moves.push(i);
@@ -339,9 +374,9 @@ function place(i) {
   const line = fiveAt(board, i, turn);
   if (line) {
     winLine = line;
-    finish(turn);
+    finishAi(turn);
   } else if (moves.length === N * N) {
-    finish(EMPTY);
+    finishAi(EMPTY);
   } else {
     turn = other(turn);
   }
@@ -350,12 +385,12 @@ function place(i) {
   return true;
 }
 
-function finish(winner) {
+function finishAi(winner) {
   over = true;
-  let title, sub = '';
-  if (mode === 'ai' && winner !== EMPTY) {
+  let title = '무승부', sub = '';
+  if (winner !== EMPTY) {
     const won = winner === humanColor;
-    const rec = loadRecord();
+    const rec = loadJson(RECORD_KEY);
     const r = rec[level] || { w: 0, l: 0 };
     if (won) r.w++; else r.l++;
     rec[level] = r;
@@ -364,31 +399,24 @@ function finish(winner) {
     title = won ? '🎉 승리!' : '😵 패배';
     sub = `${LEVELS[level].name} · ${r.w}승 ${r.l}패`;
     won ? sfx.win() : sfx.lose();
-  } else if (winner === EMPTY) {
-    title = '무승부';
-  } else {
-    title = `${winner === BLACK ? '⚫ 흑' : '⚪ 백'} 승리!`;
-    sfx.win();
   }
   // 이긴 줄을 잠깐 보여준 뒤 결과창
   setTimeout(() => {
-    if (!over) return;   // 그 사이 무르기
+    if (!over || mode !== 'ai') return;   // 그 사이 무르기
     showOverlay(`
       <h2>${title}</h2>
       ${sub ? `<p>${sub}</p>` : ''}
+      <div class="row"><button class="main" data-act="aiStart">한 판 더</button></div>
       <div class="row">
-        <button class="main" data-act="again">한 판 더</button>
-      </div>
-      <div class="row">
-        <button class="sub" data-act="view">판 보기</button>
+        <button class="sub" data-act="close">판 보기</button>
         <button class="sub" data-act="undo">무르기</button>
-        <button class="sub" data-act="menu">메뉴</button>
+        <button class="sub" data-act="home">메뉴</button>
       </div>`);
   }, 900);
 }
 
 function maybeAi() {
-  if (over || !isAiTurn()) return;
+  if (mode !== 'ai' || over || turn === humanColor) return;
   thinking = true;
   updateHud();
   // 화면이 먼저 그려지도록 한 박자 쉬고 계산
@@ -398,28 +426,19 @@ function maybeAi() {
     const wait = Math.max(0, 350 - (performance.now() - t0));
     aiTimer = setTimeout(() => {
       thinking = false;
-      if (i >= 0) place(i);
+      if (i >= 0) placeAi(i);
       updateHud();
     }, wait);
   }, 30);
 }
 
-function humanPlace(i) {
-  if (!started || over || thinking || isAiTurn()) return;
-  if (place(i)) maybeAi();
-}
-
 function undo() {
-  if (!started || !moves.length) return;
+  if (mode !== 'ai' || !moves.length) return;
   clearTimeout(aiTimer);
   thinking = false;
-  // 컴퓨터와 둘 때는 내 차례로 돌아오도록 컴퓨터 수까지 함께 무른다
-  let n = 1;
-  if (mode === 'ai') {
-    const lastBy = board[moves[moves.length - 1]];
-    n = lastBy === humanColor ? 1 : 2;
-    if (moves.length < n) n = moves.length;
-  }
+  // 내 차례로 돌아오도록 컴퓨터 수까지 함께 무른다
+  const lastBy = board[moves[moves.length - 1]];
+  const n = Math.min(moves.length, lastBy === humanColor ? 1 : 2);
   for (let k = 0; k < n; k++) {
     const i = moves.pop();
     turn = board[i];
@@ -435,23 +454,229 @@ function undo() {
   maybeAi();   // 컴퓨터가 흑이라 첫 수까지 물렀으면 다시 둔다
 }
 
+// ---------- 온라인: 연결 ----------
+const net = {
+  ws: null,
+  pulse: null,
+  outbox: [],
+  retry: 0,
+  connect() {
+    if (this.ws && this.ws.readyState <= 1) return;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}${location.pathname}`);
+    this.ws = ws;
+    ws.onopen = () => {
+      this.retry = 0;
+      this.raw('hello', { name: myName() });
+      const s = loadSession();
+      if (s) this.raw('resume', s);
+      for (const [t, p] of this.outbox.splice(0)) this.raw(t, p);
+      clearInterval(this.pulse);
+      // 프록시가 WebSocket ping 을 대신 받아버리는 환경이 있어 살아있다는 신호를 직접 보낸다
+      this.pulse = setInterval(() => this.raw('pulse'), 10000);
+    };
+    ws.onmessage = (e) => {
+      let m;
+      try { m = JSON.parse(e.data); } catch (_) { return; }
+      onNet(m);
+    };
+    ws.onclose = () => {
+      clearInterval(this.pulse);
+      if (this.ws !== ws) return;   // 일부러 닫은 연결
+      this.ws = null;
+      if (mode !== 'online') return;
+      if (room || loadSession()) {
+        // 대국 중이면 계속 다시 붙어본다. 서버는 30초 동안 자리를 비워둔다.
+        netDown = true;
+        updateHud();
+        setTimeout(() => { if (mode === 'online') this.connect(); }, Math.min(4000, 500 * 2 ** this.retry++));
+      } else {
+        showOnline('서버와 연결이 끊겼어요. 다시 시도해 주세요.');
+      }
+    };
+  },
+  send(t, p = {}) {
+    if (this.ws && this.ws.readyState === 1) this.raw(t, p);
+    else { this.outbox.push([t, p]); this.connect(); }
+  },
+  raw(t, p = {}) {
+    if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({ t, ...p }));
+  },
+  close() {
+    const ws = this.ws;
+    this.ws = null;
+    this.outbox = [];
+    clearInterval(this.pulse);
+    if (ws) ws.close();
+  },
+};
+
+function onNet(m) {
+  if (m.t === 'queued') { screen = 'queued'; showQueued(); }
+  else if (m.t === 'room') applyRoom(m);
+  else if (m.t === 'error') {
+    room = null;
+    saveSession(null);
+    showOnline(m.msg);
+  } else if (m.t === 'resumeFailed') {
+    saveSession(null);
+    if (room) { room = null; showOnline('대국이 끝나서 이어갈 수 없어요.'); }
+    netDown = false;
+    updateHud();
+  }
+}
+
+function leaveOnline() {
+  if (mode !== 'online') return;
+  net.send('leave');
+  net.close();
+  saveSession(null);
+  room = null;
+  netDown = false;
+}
+
+// ---------- 온라인: 대국 ----------
+function applyRoom(r) {
+  const prevLen = moves.length;
+  const fresh = !room || room.code !== r.code;
+  const newGame = r.state === 'playing' && (!room || room.state !== 'playing');
+  room = r;
+  netDown = false;
+  saveSession({ code: r.code, token: r.token });
+
+  board = new Int8Array(N * N);
+  r.moves.forEach((i, k) => { board[i] = k % 2 ? WHITE : BLACK; });
+  if (r.moves.length === prevLen + 1 && !fresh) sfx.place(board[r.moves[r.moves.length - 1]]);
+  if (r.moves.length !== prevLen) pending = -1;
+  moves = r.moves;
+  turn = r.turn;
+  winLine = r.winLine;
+  over = r.state === 'over';
+  turnEnd = performance.now() + r.remain;
+
+  if (r.state === 'waiting') {
+    screen = 'waiting';
+    showWaiting();
+  } else if (r.state === 'playing') {
+    if (newGame) { sfx.found(); resultSeen = ''; hover = cursor = -1; }
+    if (screen !== 'confirm') { screen = ''; hideOverlay(); }
+  } else {
+    const key = `${r.code}:${r.moves.length}:${r.reason}:${r.winner}`;
+    if (recorded !== key) {
+      recorded = key;
+      if (r.winner !== EMPTY) {
+        const rec = loadJson(ONLINE_KEY);
+        if (r.winner === r.you) rec.w = (rec.w || 0) + 1; else rec.l = (rec.l || 0) + 1;
+        store.set(ONLINE_KEY, JSON.stringify(rec));
+        r.winner === r.you ? sfx.win() : sfx.lose();
+      }
+    }
+    if (resultSeen !== key) {
+      // 오목으로 끝났으면 이긴 줄을 잠깐 보여준 뒤 결과창
+      const delay = r.reason === 'five' && screen !== 'result' ? 900 : 0;
+      setTimeout(() => { if (room === r && resultSeen !== key) showResult(); }, delay);
+    }
+  }
+  updateHud();
+  draw();
+}
+
+function opponent() {
+  return room && room.players.find((p) => p.color !== room.you);
+}
+
+function showResult() {
+  screen = 'result';
+  const r = room;
+  const opp = opponent();
+  const won = r.winner === r.you;
+  const title = r.winner === EMPTY ? '무승부' : won ? '🎉 승리!' : '😵 패배';
+  const why = {
+    five: '',
+    resign: won ? '상대가 기권했어요' : '기권했어요',
+    timeout: won ? '상대가 시간을 넘겼어요' : '시간을 넘겼어요',
+    left: won ? '상대가 나갔어요' : '연결이 끊겨 패배했어요',
+    draw: '판이 가득 찼어요',
+  }[r.reason] || '';
+  const rec = loadJson(ONLINE_KEY);
+  const iVoted = r.rematch.includes(r.you);
+  const theyVoted = opp && r.rematch.includes(opp.color);
+  let again;
+  if (!opp) again = '<p>상대가 방을 나갔어요</p>';
+  else if (iVoted) again = '<p>상대를 기다리는 중…</p>';
+  else again = `${theyVoted ? '<p>상대가 한 판 더 두고 싶어해요!</p>' : ''}
+    <div class="row"><button class="main" data-act="rematch">한 판 더</button></div>`;
+  showOverlay(`
+    <h2>${title}</h2>
+    ${why ? `<p>${why}</p>` : ''}
+    <span class="record">온라인 ${rec.w || 0}승 ${rec.l || 0}패</span>
+    ${again}
+    <div class="row">
+      <button class="sub" data-act="viewResult">판 보기</button>
+      <button class="sub" data-act="leave">나가기</button>
+    </div>`);
+}
+
+function humanPlace(i) {
+  if (!canPlay() || board[i] !== EMPTY) return;
+  if (mode === 'ai') { if (placeAi(i)) maybeAi(); return; }
+  pending = -1;
+  net.send('place', { i });
+}
+
+// 남은 시간 표시. 10초 아래로 내려가면 똑딱.
+let lastTick = -1;
+setInterval(() => {
+  if (mode !== 'online' || !room || room.state !== 'playing') return;
+  const s = Math.max(0, Math.ceil((turnEnd - performance.now()) / 1000));
+  if (s !== lastTick) {
+    lastTick = s;
+    if (s <= 10 && s > 0 && turn === room.you) sfx.tick();
+    updateHud();
+  }
+}, 200);
+
 // ---------- HUD ----------
 function updateHud() {
-  const names = mode === 'ai'
-    ? (humanColor === BLACK ? ['나', `컴퓨터 · ${LEVELS[level].name}`] : [`컴퓨터 · ${LEVELS[level].name}`, '나'])
-    : ['흑', '백'];
+  let names = ['흑', '백'];
+  let status = '';
+  if (mode === 'ai') {
+    const cpu = `컴퓨터 · ${LEVELS[level].name}`;
+    names = humanColor === BLACK ? ['나', cpu] : [cpu, '나'];
+    status = over ? (winLine ? '게임 끝' : '무승부') : thinking ? '생각 중…' : '내 차례';
+  } else if (mode === 'online' && room) {
+    for (const p of room.players) {
+      const label = p.color === room.you ? `${p.name} (나)` : p.online ? p.name : `${p.name} · 끊김`;
+      if (p.color === BLACK) names[0] = label;
+      if (p.color === WHITE) names[1] = label;
+    }
+    if (room.state === 'waiting') status = '상대 기다리는 중';
+    else if (room.state === 'over') status = '게임 끝';
+    else if (netDown) status = '다시 연결하는 중…';
+    else {
+      const s = Math.max(0, Math.ceil((turnEnd - performance.now()) / 1000));
+      status = `${turn === room.you ? '내 차례' : '상대 차례'} · ${s}초`;
+    }
+  }
   $('n1').textContent = names[0];
   $('n2').textContent = names[1];
-  $('p1').classList.toggle('turn', started && !over && turn === BLACK);
-  $('p2').classList.toggle('turn', started && !over && turn === WHITE);
-  let status = '';
-  if (!started) status = '';
-  else if (over) status = winLine ? '게임 끝' : '무승부';
-  else if (thinking) status = '생각 중…';
-  else if (mode === 'ai') status = '내 차례';
-  else status = `${turn === BLACK ? '흑' : '백'} 차례`;
+  const live = !!mode && !over && (mode === 'ai' || (room && room.state === 'playing'));
+  $('p1').classList.toggle('turn', live && turn === BLACK);
+  $('p2').classList.toggle('turn', live && turn === WHITE);
   $('status').textContent = status;
-  $('undoBtn').disabled = !started || !moves.length || (mode === 'ai' && !moves.some((i) => board[i] === humanColor));
+  const low = mode === 'online' && live && turn === room.you && turnEnd - performance.now() < 10000;
+  $('status').classList.toggle('warn', !!low);
+
+  const undoBtn = $('undoBtn');
+  if (mode === 'online') {
+    undoBtn.textContent = '🏳';
+    undoBtn.title = '기권';
+    undoBtn.disabled = !live;
+  } else {
+    undoBtn.textContent = '↩';
+    undoBtn.title = '무르기 (Z)';
+    undoBtn.disabled = mode !== 'ai' || !moves.some((i) => board[i] === humanColor);
+  }
 }
 
 // ---------- Draw ----------
@@ -537,8 +762,7 @@ function draw() {
   }
 
   // 놓을 자리 미리보기
-  const canPlay = started && !over && !thinking && !isAiTurn();
-  if (canPlay) {
+  if (canPlay()) {
     for (const [i, alpha] of [[hover, 0.45], [cursor, 0.45], [pending, 0.7]]) {
       if (i < 0 || board[i]) continue;
       drawStone(px(i), py(i), turn, alpha);
@@ -566,16 +790,31 @@ function segHtml(key, opts, value) {
     `<button data-v="${v}" class="${String(v) === String(value) ? 'on' : ''}">${label}</button>`).join('')}</div>`;
 }
 
-function showMenu() {
-  const rec = loadRecord()[level];
+function showHome() {
+  leaveOnline();
+  clearTimeout(aiTimer);
+  mode = null;
+  screen = '';
+  thinking = false;
+  resetBoard();
+  updateHud();
+  draw();
+  const wins = Number(store.get(WINS_KEY)) || 0;
+  const on = loadJson(ONLINE_KEY);
   showOverlay(`
     <h1>오목</h1>
     <p>가로·세로·대각선으로 <b>5개</b>를 먼저 이으면 승리!</p>
-    <div class="group">
-      <span class="label">상대</span>
-      ${segHtml('mode', [['ai', '🤖 컴퓨터'], ['pvp', '👥 둘이서']], mode)}
+    <div class="modes">
+      <button class="mode" data-act="aiMenu"><span class="ico">🤖</span><b>컴퓨터랑 하기</b><small>쉬움 · 보통 · 어려움</small></button>
+      <button class="mode" data-act="online"><span class="ico">🌐</span><b>온라인 오목</b><small>빠른 대전 · 친구와 방 만들기</small></button>
     </div>
-    ${mode === 'ai' ? `
+    <span class="record">${wins || on.w || on.l ? `컴퓨터 상대 ${wins}승 · 온라인 ${on.w || 0}승 ${on.l || 0}패` : ''}</span>`);
+}
+
+function showAiMenu() {
+  const rec = loadJson(RECORD_KEY)[level];
+  showOverlay(`
+    <h2>🤖 컴퓨터랑 하기</h2>
     <div class="group">
       <span class="label">난이도</span>
       ${segHtml('level', [['easy', '쉬움'], ['normal', '보통'], ['hard', '어려움']], level)}
@@ -584,12 +823,73 @@ function showMenu() {
     <div class="group">
       <span class="label">내 돌</span>
       ${segHtml('color', [[BLACK, '⚫ 흑 (먼저)'], [WHITE, '⚪ 백 (나중)']], humanColor)}
-    </div>` : ''}
-    <div class="row">
-      <button class="main" data-act="start">${started && !over && moves.length ? '새로 시작' : '시작하기'}</button>
-      ${started && !over && moves.length ? '<button class="sub" data-act="close">계속하기</button>' : ''}
     </div>
+    <div class="row">
+      <button class="main" data-act="aiStart">${mode === 'ai' && !over && moves.length ? '새로 시작' : '시작하기'}</button>
+      ${mode === 'ai' && !over && moves.length ? '<button class="sub" data-act="close">계속하기</button>' : ''}
+    </div>
+    <button class="back" data-act="home">← 처음으로</button>
     <div class="help">🖱️ 클릭으로 착수 · 📱 두 번 눌러 착수<br>⌨️ 방향키 + Space · Z 무르기</div>`);
+}
+
+function showOnline(error = '') {
+  leaveOnline();
+  clearTimeout(aiTimer);
+  mode = 'online';
+  screen = 'online';
+  room = null;
+  resetBoard();
+  updateHud();
+  draw();
+  showOverlay(`
+    <h2>🌐 온라인 오목</h2>
+    <div class="group">
+      <span class="label">내 이름</span>
+      <input id="nameInput" maxlength="10" placeholder="이름 (최대 10자)" value="${esc(myName())}" autocomplete="off">
+    </div>
+    <div class="row"><button class="main" data-act="quick">⚡ 빠른 대전</button></div>
+    <div class="row">
+      <button class="sub" data-act="create">방 만들기</button>
+    </div>
+    <div class="row join">
+      <input id="codeInput" maxlength="4" placeholder="방 코드" autocomplete="off" autocapitalize="characters">
+      <button class="sub" data-act="join">들어가기</button>
+    </div>
+    <span class="error">${esc(error)}</span>
+    <button class="back" data-act="home">← 처음으로</button>
+    <div class="help">한 수에 30초 · 흑백은 한 판마다 바뀌어요</div>`);
+}
+
+function showQueued() {
+  showOverlay(`
+    <h2>상대를 찾는 중…</h2>
+    <div class="dots"><span></span><span></span><span></span></div>
+    <p>누군가 빠른 대전을 누르면 바로 시작해요</p>
+    <button class="sub" data-act="cancel">취소</button>`);
+}
+
+function inviteUrl() {
+  return `${location.origin}${location.pathname}?room=${room.code}`;
+}
+
+function showWaiting() {
+  showOverlay(`
+    <h2>친구를 기다리는 중…</h2>
+    <span class="label">방 코드</span>
+    <div class="code">${esc(room.code)}</div>
+    <p>친구가 <b>온라인 오목 → 들어가기</b>에<br>이 코드를 입력하면 시작해요</p>
+    <div class="row">
+      <button class="main" data-act="copy">🔗 초대 링크 복사</button>
+    </div>
+    <button class="sub" data-act="cancel">취소</button>`);
+}
+
+function saveName() {
+  const input = $('nameInput');
+  if (!input) return;
+  const name = input.value.trim().slice(0, 10);
+  store.set('omokName', name);
+  net.send('hello', { name });
 }
 
 $('overlay').addEventListener('click', (e) => {
@@ -598,18 +898,69 @@ $('overlay').addEventListener('click', (e) => {
   const seg = btn.closest('.seg');
   if (seg) {
     const v = btn.dataset.v;
-    if (seg.dataset.key === 'mode') { mode = v; store.set('omokMode', v); }
     if (seg.dataset.key === 'level') { level = v; store.set('omokLevel', v); }
     if (seg.dataset.key === 'color') { humanColor = Number(v); store.set('omokColor', v); }
-    showMenu();
+    showAiMenu();
     return;
   }
   const act = btn.dataset.act;
-  if (act === 'start' || act === 'again') newGame();
-  else if (act === 'close' || act === 'view') { hideOverlay(); updateHud(); }
+  if (act === 'home') showHome();
+  else if (act === 'aiMenu') showAiMenu();
+  else if (act === 'aiStart') newAiGame();
+  else if (act === 'close') { hideOverlay(); updateHud(); }
   else if (act === 'undo') undo();
-  else if (act === 'menu') showMenu();
+  else if (act === 'online') showOnline();
+  else if (act === 'quick') { saveName(); net.send('quick'); }
+  else if (act === 'create') { saveName(); net.send('create'); }
+  else if (act === 'join') {
+    const code = ($('codeInput').value || '').trim().toUpperCase();
+    if (code.length !== 4) { $('overlay').querySelector('.error').textContent = '방 코드 4자리를 입력해 주세요.'; return; }
+    saveName();
+    net.send('join', { code });
+  } else if (act === 'cancel') { net.send('cancel'); showOnline(); }
+  else if (act === 'copy') {
+    const url = inviteUrl();
+    const done = () => { btn.textContent = '✅ 복사했어요'; setTimeout(() => { btn.textContent = '🔗 초대 링크 복사'; }, 1500); };
+    if (navigator.share && matchMedia('(pointer: coarse)').matches) navigator.share({ title: '오목 한 판 해요!', url }).catch(() => {});
+    else if (navigator.clipboard) navigator.clipboard.writeText(url).then(done, () => prompt('링크를 복사하세요', url));
+    else prompt('링크를 복사하세요', url);
+  } else if (act === 'rematch') net.send('rematch');
+  else if (act === 'viewResult') { resultSeen = `${room.code}:${room.moves.length}:${room.reason}:${room.winner}`; screen = ''; hideOverlay(); }
+  else if (act === 'leave') showOnline();
+  else if (act === 'resign') { net.send('resign'); screen = ''; hideOverlay(); }
+  else if (act === 'quit') showHome();
+  else if (act === 'resume') { screen = ''; hideOverlay(); }
 });
+
+// 입력창에서 Enter
+$('overlay').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  if (e.target.id === 'codeInput') $('overlay').querySelector('[data-act="join"]').click();
+  if (e.target.id === 'nameInput') $('overlay').querySelector('[data-act="quick"]').click();
+  e.stopPropagation();
+});
+
+function confirmResign() {
+  screen = 'confirm';
+  showOverlay(`
+    <h2>기권할까요?</h2>
+    <p>이번 판은 패배로 기록돼요</p>
+    <div class="row">
+      <button class="main" data-act="resume">계속 두기</button>
+      <button class="sub" data-act="resign">🏳 기권</button>
+    </div>`);
+}
+
+function confirmQuit() {
+  screen = 'confirm';
+  showOverlay(`
+    <h2>대국을 그만둘까요?</h2>
+    <p>지금 나가면 기권패가 돼요</p>
+    <div class="row">
+      <button class="main" data-act="resume">계속 두기</button>
+      <button class="sub" data-act="quit">나가기</button>
+    </div>`);
+}
 
 // ---------- Input ----------
 function cellAt(e) {
@@ -628,9 +979,14 @@ canvas.addEventListener('pointermove', (e) => {
 });
 canvas.addEventListener('pointerleave', () => { hover = -1; draw(); });
 canvas.addEventListener('pointerdown', (e) => {
-  if (over && started && !overlayOpen()) { showMenuOrResult(); return; }
+  // 판 보기 중에 누르면 결과창으로 돌아간다
+  if (over && !overlayOpen()) {
+    if (mode === 'online' && room) { resultSeen = ''; showResult(); }
+    else if (mode === 'ai') finishAiOverlay();
+    return;
+  }
   const i = cellAt(e);
-  if (i < 0 || board[i]) return;
+  if (i < 0 || board[i] || !canPlay()) return;
   cursor = -1;
   if (e.pointerType === 'mouse') { humanPlace(i); return; }
   // 손가락은 빗나가기 쉬우니 한 번 눌러 확인, 같은 곳을 다시 눌러 착수
@@ -638,20 +994,31 @@ canvas.addEventListener('pointerdown', (e) => {
   else { pending = i; draw(); }
 });
 
-// 결과창을 닫고 판을 보다가 누르면 다시 결과창으로
-function showMenuOrResult() {
+function finishAiOverlay() {
   showOverlay(`<h2>${winLine ? '게임 끝' : '무승부'}</h2>
-    <div class="row"><button class="main" data-act="again">한 판 더</button></div>
+    <div class="row"><button class="main" data-act="aiStart">한 판 더</button></div>
     <div class="row">
-      <button class="sub" data-act="view">판 보기</button>
+      <button class="sub" data-act="close">판 보기</button>
       <button class="sub" data-act="undo">무르기</button>
-      <button class="sub" data-act="menu">메뉴</button>
+      <button class="sub" data-act="home">메뉴</button>
     </div>`);
 }
 
+function openMenu() {
+  if (mode === 'online' && room && room.state === 'playing') confirmQuit();
+  else if (mode === 'online') showOnline();
+  else if (mode === 'ai') showAiMenu();
+  else showHome();
+}
+
 addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
   if (e.code === 'KeyM') { toggleMute(); return; }
-  if (e.code === 'Escape') { overlayOpen() && started && !over ? hideOverlay() : showMenu(); return; }
+  if (e.code === 'Escape') {
+    if (overlayOpen() && (screen === 'confirm' || (mode === 'ai' && !over && moves.length))) { screen = ''; hideOverlay(); }
+    else openMenu();
+    return;
+  }
   if (overlayOpen()) {
     if (e.code === 'Enter' || e.code === 'Space') {
       e.preventDefault();
@@ -682,11 +1049,40 @@ function toggleMute() {
   $('muteBtn').textContent = muted ? '🔇' : '🔊';
 }
 $('muteBtn').onclick = (e) => { e.currentTarget.blur(); toggleMute(); };
-$('undoBtn').onclick = (e) => { e.currentTarget.blur(); undo(); };
-$('menuBtn').onclick = (e) => { e.currentTarget.blur(); showMenu(); };
+$('undoBtn').onclick = (e) => {
+  e.currentTarget.blur();
+  if (mode === 'online') confirmResign();
+  else undo();
+};
+$('menuBtn').onclick = (e) => { e.currentTarget.blur(); openMenu(); };
 $('muteBtn').textContent = muted ? '🔇' : '🔊';
 
-showMenu();
-updateHud();
+// ---------- Boot ----------
+// 초대 링크(?room=CODE)로 들어왔거나, 새로고침 전에 두던 대국이 있으면 온라인으로 바로 간다
+const invite = new URLSearchParams(location.search).get('room');
+if (invite) history.replaceState(null, '', location.pathname);
 fit();
+if (loadSession()) {
+  mode = 'online';
+  screen = '';
+  showOverlay('<h2>대국으로 돌아가는 중…</h2>');
+  net.connect();
+  // 이어갈 대국이 없으면 resumeFailed 가 오고, 초대 링크가 있으면 그 방으로
+  const until = setInterval(() => {
+    if (room || !loadSession()) {
+      clearInterval(until);
+      if (!room) invite ? joinInvite(invite) : showOnline();
+    }
+  }, 100);
+} else if (invite) {
+  joinInvite(invite);
+} else {
+  showHome();
+}
+
+function joinInvite(code) {
+  showOnline();
+  net.send('join', { code: code.toUpperCase() });
+}
+updateHud();
 }
