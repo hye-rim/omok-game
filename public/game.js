@@ -1,13 +1,14 @@
 'use strict';
 
 // ---------- Rules ----------
-// 15×15 판, 흑이 먼저 둔다. 가로·세로·대각선으로 5개 이상 이으면 승리 (자유룰, 금수 없음).
+// 15×15 판, 흑이 먼저 둔다. 가로·세로·대각선으로 정확히 5개를 이으면 승리.
+// 6개 이상(장목·육목)은 승리로 치지 않는다. 금수(3-3 등)는 없다.
 const N = 15;
 const EMPTY = 0, BLACK = 1, WHITE = 2;
 const other = (p) => 3 - p;
 const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
 
-// idx 에 방금 둔 돌로 5목 이상이 되었으면 그 줄의 칸들을, 아니면 null
+// idx 에 방금 둔 돌로 정확히 5목이 되었으면 그 줄의 칸들을, 아니면 null (6목 이상은 무효)
 function fiveAt(b, idx, p) {
   const r0 = (idx / N) | 0, c0 = idx % N;
   for (const [dr, dc] of DIRS) {
@@ -19,18 +20,21 @@ function fiveAt(b, idx, p) {
         r += dr * s; c += dc * s;
       }
     }
-    if (line.length >= 5) return line;
+    if (line.length === 5) return line;
   }
   return null;
 }
 
 // ---------- AI: 한 수 평가 ----------
-// 빈칸에 p 가 둔다고 쳤을 때, 네 방향 각각 그 칸을 가운데로 한 9칸 문자열을 만들어 모양을 판정한다.
+// 빈칸에 p 가 둔다고 쳤을 때, 네 방향 각각 그 칸을 가운데로 한 11칸 문자열을 만들어 모양을 판정한다.
 //   x = 내 돌(가운데 포함), o = 상대 돌이나 판 밖, . = 빈칸
+// 6목은 이기지 못하므로 오목·4는 패턴 대신 '한 수 더 두면 정확히 5가 되는 자리'를 직접 센다.
+// (9칸만 보면 창 밖의 여섯 번째 돌을 못 봐서 11칸을 본다)
+const C = 5;   // 문자열에서 방금 둔 칸의 위치
 const SHAPES = [
-  { score: 10000000, pats: ['xxxxx'] },                                        // 0 오목
-  { score: 1000000, pats: ['.xxxx.'] },                                        // 1 열린 4
-  { score: 30000, pats: ['xxxx.', '.xxxx', 'x.xxx', 'xxx.x', 'xx.xx'] },       // 2 막힌 4 / 띈 4
+  { score: 10000000, pats: [] },                                               // 0 오목 (정확히 5)
+  { score: 1000000, pats: [] },                                                // 1 열린 4 (5가 되는 자리 2곳 이상)
+  { score: 30000, pats: [] },                                                  // 2 막힌 4 / 띈 4 (1곳)
   { score: 25000, pats: ['..xxx.', '.xxx..', '.xx.x.', '.x.xx.'] },            // 3 열린 3
   { score: 1500, pats: ['xxx..', '..xxx', 'xx.x.', '.x.xx', 'x.xx.', '.xx.x',
     'x..xx', 'xx..x', 'x.x.x', '.xxx.'] },                                     // 4 막힌 3
@@ -42,7 +46,7 @@ const SHAPE_SCORE = [...SHAPES.map((s) => s.score), 120, 10, 0];
 
 function lineString(b, r, c, dr, dc, p) {
   let s = '';
-  for (let k = -4; k <= 4; k++) {
+  for (let k = -C; k <= C; k++) {
     if (k === 0) { s += 'x'; continue; }
     const rr = r + dr * k, cc = c + dc * k;
     if (rr < 0 || rr >= N || cc < 0 || cc >= N) s += 'o';
@@ -54,19 +58,46 @@ function lineString(b, r, c, dr, dc, p) {
   return s;
 }
 
+// i 칸을 포함하는 x 연속 길이
+function runLen(s, i) {
+  if (s[i] !== 'x') return 0;
+  let a = i, z = i;
+  while (a > 0 && s[a - 1] === 'x') a--;
+  while (z < s.length - 1 && s[z + 1] === 'x') z++;
+  return z - a + 1;
+}
+// 빈칸 하나를 더 채우면 가운데 돌이 정확히 5목이 되는 자리 수
+function winPoints(s) {
+  let n = 0;
+  for (let e = 0; e < s.length; e++) {
+    if (s[e] !== '.') continue;
+    if (runLen(s.slice(0, e) + 'x' + s.slice(e + 1), C) === 5) n++;
+  }
+  return n;
+}
+
 function shapeOf(s) {
-  for (let i = 0; i < SHAPES.length; i++) {
+  const run = runLen(s, C);
+  if (run === 5) return S_FIVE;
+  if (run < 5) {
+    const wp = winPoints(s);
+    if (wp >= 2) return S_OPEN4;
+    if (wp === 1) return S_FOUR;
+  }
+  for (let i = S_OPEN3; i < SHAPES.length; i++) {
     for (const pat of SHAPES[i].pats) {
       let at = s.indexOf(pat);
       while (at !== -1) {
-        if (at <= 4 && 4 < at + pat.length) return i;   // 가운데(방금 둔 칸)를 지나는 모양만
+        // 가운데(방금 둔 칸)를 지나고, 양 끝 바로 바깥이 내 돌이 아닌 모양만 (붙어 있으면 6목 이상이 된다)
+        if (at <= C && C < at + pat.length && s[at - 1] !== 'x' && s[at + pat.length] !== 'x') return i;
         at = s.indexOf(pat, at + 1);
       }
     }
   }
+  if (run >= 6) return S_NONE;   // 이미 6목 이상인 줄: 더 이어 봐야 이길 수 없다
   // 나머지: 가운데를 포함하는 5칸 창에 상대 돌이 없으면 그 안의 내 돌 수로 판단
   let most = 0;
-  for (let st = 0; st <= 4; st++) {
+  for (let st = C - 4; st <= C; st++) {
     const w = s.substr(st, 5);
     if (w.includes('o')) continue;
     let n = 0;
@@ -124,13 +155,18 @@ function rankMoves(b, p, defense = 1) {
 
 // ---------- AI: 탐색 (어려움) ----------
 // 판 전체의 5칸 창마다 한 사람 돌만 있으면 그 개수로 점수를 매긴다.
+// 창 바로 앞뒤 칸도 기억해 두고, 거기에 같은 색 돌이 있으면(=채워도 6목이 되는 창) 세지 않는다.
 const WINDOWS = [];
+const inBoard = (r, c) => r >= 0 && r < N && c >= 0 && c < N;
 for (let r = 0; r < N; r++) {
   for (let c = 0; c < N; c++) {
     for (const [dr, dc] of DIRS) {
       const er = r + dr * 4, ec = c + dc * 4;
-      if (er < 0 || er >= N || ec < 0 || ec >= N) continue;
-      WINDOWS.push([0, 1, 2, 3, 4].map((k) => (r + dr * k) * N + (c + dc * k)));
+      if (!inBoard(er, ec)) continue;
+      const cells = [0, 1, 2, 3, 4].map((k) => (r + dr * k) * N + (c + dc * k));
+      cells.before = inBoard(r - dr, c - dc) ? (r - dr) * N + (c - dc) : -1;
+      cells.after = inBoard(er + dr, ec + dc) ? (er + dr) * N + (ec + dc) : -1;
+      WINDOWS.push(cells);
     }
   }
 }
@@ -151,6 +187,10 @@ function evaluate(b, p) {
       else gap = i;
     }
     if (np && nq) continue;
+    // 창 바깥에 같은 색이 붙어 있으면 채워도 6목 이상 → 이길 수 없는 창
+    const outside = (x) => (w.before >= 0 && b[w.before] === x) || (w.after >= 0 && b[w.after] === x);
+    if (np && (np >= 5 || outside(p))) continue;
+    if (nq && (nq >= 5 || outside(q))) continue;
     if (np === 4) myFour = true;
     if (nq === 4) theirFourGaps.add(gap);
     mine += WIN_WEIGHT[np];
@@ -814,7 +854,7 @@ function showHome() {
   const on = loadJson(ONLINE_KEY);
   showOverlay(`
     <h1>오<span class="y">목</span></h1>
-    <p>가로·세로·대각선으로 <b>5개</b>를 먼저 이으면 승리!</p>
+    <p>가로·세로·대각선으로 <b>딱 5개</b>를 먼저 이으면 승리!<br>6개 이상 이어지면 인정되지 않아요</p>
     <div class="modes">
       <button class="mode" data-act="aiMenu"><span class="ico">🤖</span><b>컴퓨터랑 하기</b><small>쉬움 · 보통 · 어려움</small></button>
       <button class="mode" data-act="online"><span class="ico">🌐</span><b>온라인 오목</b><small>빠른 대전 · 친구와 방 만들기</small></button>
