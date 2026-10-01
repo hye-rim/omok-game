@@ -291,7 +291,7 @@ function fit() {
   const hudH = 112;   // 위 상태줄 + 흑 VS 백 + 판 테두리·그림자
   const scale = Math.min((innerWidth - 28) / SIZE, (innerHeight - 24 - hudH) / SIZE);
   const css = Math.floor(SIZE * scale);
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
   canvas.style.width = canvas.style.height = css + 'px';
   canvas.width = canvas.height = Math.round(css * dpr);
   ctx.setTransform(canvas.width / SIZE, 0, 0, canvas.height / SIZE, 0, 0);
