@@ -880,7 +880,7 @@ function showAiMenu() {
       ${mode === 'ai' && !over && moves.length ? '<button class="sub" data-act="close">계속하기</button>' : ''}
     </div>
     <button class="back" data-act="home">← 처음으로</button>
-    <div class="help">🖱️ 클릭으로 착수 · 📱 두 번 눌러 착수<br>⌨️ 방향키 + Space · Z 무르기</div>`);
+    <div class="help"><span class="pc">🖱️ 클릭으로 착수<br>⌨️ 방향키 + Space · Z 무르기</span><span class="touch">👆 두 번 눌러 착수 (처음 누르면 자리 표시)</span></div>`);
 }
 
 function showOnline(error = '') {
