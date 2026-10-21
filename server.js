@@ -286,7 +286,7 @@ const handlers = {
     const room = rooms.get(client.roomCode);
     const seat = room && seatOf(room, client);
     if (!seat || room.state !== 'playing' || room.turn !== seat.color) return;
-    const i = Number(msg.i);
+    const i = msg.i;                                          // 숫자가 아니면(null·문자열 등) 받지 않는다 (Number(null) 은 0 이 된다)
     if (!Number.isInteger(i) || i < 0 || i >= N * N || room.board[i] !== EMPTY) return;
     room.board[i] = seat.color;
     room.moves.push(i);

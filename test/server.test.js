@@ -60,6 +60,28 @@ test('oversized websocket message closes the connection (1009)', async () => {
   assert.strictEqual(await get('/'), 200);          // 한 손님의 오류로 서버가 죽으면 안 된다
 });
 
+const lastRoom = (c) => [...c.msgs].reverse().find((m) => m.t === 'room');
+const until = async (fn, ms = 4000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (fn()) return true; await sleep(15); } return false; };
+
+test('place: only an integer cell number is accepted (null, strings, booleans are ignored)', async () => {
+  await ready;
+  const a = await open(), b = await open();
+  a.ws.send(JSON.stringify({ t: 'quick' }));
+  await until(() => a.msgs.some((m) => m.t === 'queued'));
+  b.ws.send(JSON.stringify({ t: 'quick' }));
+  assert.ok(await until(() => lastRoom(a) && lastRoom(a).state === 'playing' && lastRoom(b) && lastRoom(b).state === 'playing'));
+  const mover = lastRoom(a).turn === lastRoom(a).you ? a : b;
+  // Number(null) 은 0, Number('5') 는 5 가 되어 예전엔 0번·5번 칸 착수로 받아들여졌다
+  for (const bad of [null, '0', '5', true, false, [], [3], 3.5, -1, 15 * 15, 'x']) mover.ws.send(JSON.stringify({ t: 'place', i: bad }));
+  mover.ws.send(JSON.stringify({ t: 'place' }));
+  await sleep(400);
+  assert.strictEqual(lastRoom(a).moves.length, 0, 'nothing was accepted');
+  mover.ws.send(JSON.stringify({ t: 'place', i: 112 }));
+  assert.ok(await until(() => lastRoom(a).moves.length === 1), 'a real cell number is accepted');
+  a.ws.close(); b.ws.close();
+});
+
+// 같은 주소에서 코드를 일부러 많이 틀리므로 이 시험은 맨 뒤에 둔다 (뒤의 시험이 막히지 않게)
 test('repeated wrong room codes get temporarily blocked', async () => {
   await ready;
   const c = await open();
